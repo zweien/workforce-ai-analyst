@@ -1,0 +1,6 @@
+{
+  "name": "WorkForce AI Analyst",
+  "description": "Intelligent employee attendance analysis tool. Upload monthly Excel logs to visualize work duration trends and generate AI-powered efficiency reports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
