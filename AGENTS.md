@@ -4,7 +4,7 @@
 
 ### Issue tracker
 
-Issues are tracked as local markdown files under `.scratch/<feature-slug>/`. See `docs/agents/issue-tracker.md`.
+Issues live in this repo's GitHub Issues (`zweien/workforce-ai-analyst`), managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
