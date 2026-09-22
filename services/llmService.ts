@@ -2,7 +2,7 @@
 // Works with any domestic provider exposing the OpenAI format:
 // DeepSeek, Qwen (DashScope compatible-mode), GLM, Kimi, etc.
 import { AttendanceRecord } from "../types";
-import { getApiKey, getSettings } from "./settings";
+import { getApiKey, getSettings, isTauri } from "./settings";
 
 const SYSTEM_INSTRUCTION = `你是一位顶级人力资源数据分析专家和组织绩效顾问。
 你的任务是根据提供的考勤数据，生成一份极具洞察力的中文 Markdown 格式分析报告。
@@ -29,9 +29,15 @@ export class LlmConfigError extends Error {}
  *   https://api.deepseek.com            -> + /v1/chat/completions
  *   https://api.deepseek.com/v1         -> + /chat/completions
  *   https://.../v1/chat/completions     -> as-is
+ * A missing scheme defaults to http:// for LAN hosts (IP / localhost / *.local)
+ * and https:// everywhere else.
  */
-export const toChatCompletionsUrl = (baseUrl: string): string => {
-  const trimmed = baseUrl.trim().replace(/\/+$/, '');
+export const toChatCompletionsUrl = (raw: string): string => {
+  let trimmed = raw.trim().replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(trimmed)) {
+    const isLan = /^(localhost|\d{1,3}(\.\d{1,3}){3}([:/]|$)|[a-z0-9-]+\.local\b)/i.test(trimmed);
+    trimmed = `${isLan ? 'http' : 'https'}://${trimmed}`;
+  }
   if (trimmed.endsWith('/chat/completions')) return trimmed;
   if (/\/v\d+$/.test(trimmed)) return `${trimmed}/chat/completions`;
   return `${trimmed}/v1/chat/completions`;
@@ -133,9 +139,9 @@ export const generateAttendanceReport = async (
   positionContext: string | null
 ): Promise<string> => {
   const settings = getSettings();
-  const apiKey = await getApiKey();
+  const url = toChatCompletionsUrl(settings.baseUrl);
 
-  if (!settings.baseUrl.trim() || !settings.model.trim() || !apiKey) {
+  if (!settings.baseUrl.trim() || !settings.model.trim()) {
     throw new LlmConfigError("尚未配置 LLM 服务地址、模型或 API Key,请先打开设置完成配置。");
   }
 
@@ -152,9 +158,30 @@ export const generateAttendanceReport = async (
     请输出专业、深度的 Markdown 报告。注意：如果数据跨越多个月份，请重点提及趋势变化。
   `;
 
+  // In the Tauri app the call runs on the Rust side: no CORS /
+  // Local-Network-Access restrictions, and the key never enters the webview.
+  if (isTauri()) {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke<string>('llm_chat', {
+        url,
+        model: settings.model,
+        system: SYSTEM_INSTRUCTION,
+        prompt,
+      });
+    } catch (err) {
+      throw new Error(typeof err === 'string' ? err : (err as Error)?.message ?? String(err));
+    }
+  }
+
+  const apiKey = await getApiKey();
+  if (!apiKey) {
+    throw new LlmConfigError("尚未配置 API Key,请先打开设置完成配置。");
+  }
+
   let response: Response;
   try {
-    response = await fetch(toChatCompletionsUrl(settings.baseUrl), {
+    response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -183,5 +210,7 @@ export const generateAttendanceReport = async (
   }
 
   const data = await response.json();
-  return data?.choices?.[0]?.message?.content || "AI 暂时无法生成报告，请检查网络或稍后再试。";
+  const message = data?.choices?.[0]?.message;
+  const content = message?.content?.trim() ? message.content : message?.reasoning_content;
+  return content || "AI 暂时无法生成报告，请检查网络或稍后再试。";
 };
