@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { FileUpload } from './components/FileUpload';
 import { SettingsModal } from './components/SettingsModal';
+import { MarkdownReport } from './components/MarkdownReport';
 import { DepartmentBarChart, DistributionChart, MonthlyTrendChart } from './components/Charts';
 import { StatsCards } from './components/StatsCards';
 import { AttendanceRecord, AnalysisStatus } from './types';
@@ -438,8 +439,8 @@ const App: React.FC = () => {
                   </div>
                 )}
                 {analysisStatus === AnalysisStatus.COMPLETED && (
-                  <div className="prose prose-invert max-w-none bg-black/20 p-8 rounded-xl border border-white/10">
-                    <pre className="whitespace-pre-wrap font-sans text-sm leading-7 text-indigo-50">{aiReport}</pre>
+                  <div className="bg-black/20 p-8 rounded-xl border border-white/10">
+                    <MarkdownReport content={aiReport} />
                   </div>
                 )}
                 {analysisStatus === AnalysisStatus.ERROR && (
