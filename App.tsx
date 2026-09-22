@@ -1,9 +1,9 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { 
-  LayoutDashboard, 
-  Filter, 
-  Sparkles, 
-  BarChart3, 
+import {
+  LayoutDashboard,
+  Filter,
+  Sparkles,
+  BarChart3,
   LogOut,
   AlertCircle,
   ChevronDown,
@@ -11,15 +11,19 @@ import {
   CalendarDays,
   Download,
   FileDown,
+  Settings as SettingsIcon,
   Users as UsersIcon,
   Briefcase
 } from 'lucide-react';
 import { FileUpload } from './components/FileUpload';
+import { SettingsModal } from './components/SettingsModal';
 import { DepartmentBarChart, DistributionChart, MonthlyTrendChart } from './components/Charts';
 import { StatsCards } from './components/StatsCards';
 import { AttendanceRecord, AnalysisStatus } from './types';
-import { generateAttendanceReport } from './services/geminiService';
-import { exportSummaryToExcel } from './services/excelService';
+import { generateAttendanceReport, LlmConfigError } from './services/llmService';
+import { buildSummaryWorkbook } from './services/excelService';
+import { saveBinaryFile, saveTextFile } from './services/fileIO';
+import { hasApiKey } from './services/settings';
 
 const App: React.FC = () => {
   const [data, setData] = useState<AttendanceRecord[]>([]);
@@ -33,6 +37,9 @@ const App: React.FC = () => {
   
   const [analysisStatus, setAnalysisStatus] = useState<AnalysisStatus>(AnalysisStatus.IDLE);
   const [aiReport, setAiReport] = useState<string>('');
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [keyMissing, setKeyMissing] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   
   const batchMenuRef = useRef<HTMLDivElement>(null);
   const deptMenuRef = useRef<HTMLDivElement>(null);
@@ -131,6 +138,8 @@ const App: React.FC = () => {
     setSelectedPositions(positions);
     setAnalysisStatus(AnalysisStatus.IDLE);
     setAiReport('');
+    setAiError(null);
+    hasApiKey().then(ok => setKeyMissing(!ok));
   };
 
   const toggleBatch = (batch: string) => {
@@ -171,41 +180,38 @@ const App: React.FC = () => {
 
   const handleGenerateReport = async () => {
     if (filteredRawData.length === 0) return;
-    
+
     setAnalysisStatus(AnalysisStatus.ANALYZING);
+    setAiError(null);
     try {
-      const deptContext = selectedDepts.size === allDepartments.length 
-        ? null 
+      const deptContext = selectedDepts.size === allDepartments.length
+        ? null
         : Array.from(selectedDepts).join(', ');
-      
+
       const posContext = selectedPositions.size === allPositions.length
         ? null
         : Array.from(selectedPositions).join(', ');
-        
+
       const report = await generateAttendanceReport(filteredRawData, deptContext, posContext);
       setAiReport(report);
       setAnalysisStatus(AnalysisStatus.COMPLETED);
     } catch (error) {
       console.error(error);
+      setAiError(error instanceof Error ? error.message : String(error));
+      if (error instanceof LlmConfigError) setKeyMissing(true);
       setAnalysisStatus(AnalysisStatus.ERROR);
     }
   };
 
-  const handleExportExcel = () => {
+  const handleExportExcel = async () => {
     const deptTag = selectedDepts.size === allDepartments.length ? '全部部门' : '部分部门';
     const fileName = `考勤汇总_${deptTag}_${new Date().toISOString().slice(0, 10)}.xlsx`;
-    exportSummaryToExcel(aggregatedTableData, fileName);
+    await saveBinaryFile(fileName, buildSummaryWorkbook(aggregatedTableData));
   };
 
-  const handleDownloadReport = () => {
+  const handleDownloadReport = async () => {
     if (!aiReport) return;
-    const blob = new Blob([aiReport], { type: 'text/markdown;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `AI智能分析报告_${new Date().toISOString().slice(0, 10)}.md`;
-    link.click();
-    URL.revokeObjectURL(url);
+    await saveTextFile(`AI分析报告_${new Date().toISOString().slice(0, 10)}.md`, aiReport);
   };
 
   return (
@@ -320,7 +326,14 @@ const App: React.FC = () => {
                 )}
               </div>
 
-              <button 
+              <button
+                onClick={() => setSettingsOpen(true)}
+                className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
+                title="AI 服务设置"
+              >
+                <SettingsIcon className="w-5 h-5" />
+              </button>
+              <button
                 onClick={() => { setData([]); setSelectedBatches(new Set()); setSelectedDepts(new Set()); setSelectedPositions(new Set()); }}
                 className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
                 title="清除所有数据"
@@ -413,15 +426,34 @@ const App: React.FC = () => {
                   </div>
                 </div>
 
+                {keyMissing && analysisStatus !== AnalysisStatus.ANALYZING && (
+                  <div className="flex items-center justify-between p-4 mb-4 rounded-xl bg-amber-500/10 border border-amber-400/30 text-amber-100">
+                    <span className="text-sm">首次使用请先配置 AI 服务(地址 / 模型 / API Key),本地统计不受影响。</span>
+                    <button
+                      onClick={() => setSettingsOpen(true)}
+                      className="ml-4 px-4 py-1.5 rounded-lg bg-amber-400/20 border border-amber-300/40 text-xs font-medium hover:bg-amber-400/30 whitespace-nowrap"
+                    >
+                      打开设置
+                    </button>
+                  </div>
+                )}
                 {analysisStatus === AnalysisStatus.COMPLETED && (
                   <div className="prose prose-invert max-w-none bg-black/20 p-8 rounded-xl border border-white/10">
                     <pre className="whitespace-pre-wrap font-sans text-sm leading-7 text-indigo-50">{aiReport}</pre>
                   </div>
                 )}
                 {analysisStatus === AnalysisStatus.ERROR && (
-                   <div className="flex items-center p-4 rounded-lg bg-red-900/30 border border-red-500/30 text-red-200">
-                    <AlertCircle className="w-5 h-5 mr-2" />
-                    报告生成失败，请重试。
+                   <div className="flex items-center justify-between p-4 rounded-lg bg-red-900/30 border border-red-500/30 text-red-200">
+                    <span className="text-sm flex items-center">
+                      <AlertCircle className="w-5 h-5 mr-2 flex-shrink-0" />
+                      {aiError || '报告生成失败,请重试。'}
+                    </span>
+                    <button
+                      onClick={() => setSettingsOpen(true)}
+                      className="ml-4 px-4 py-1.5 rounded-lg bg-red-500/20 border border-red-400/40 text-xs font-medium hover:bg-red-500/30 whitespace-nowrap"
+                    >
+                      检查设置
+                    </button>
                    </div>
                 )}
               </div>
@@ -486,6 +518,7 @@ const App: React.FC = () => {
           </div>
         )}
       </main>
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 };

@@ -1,5 +1,8 @@
-import { GoogleGenAI } from "@google/genai";
+// OpenAI-compatible chat-completions client (ADR-0002).
+// Works with any domestic provider exposing the OpenAI format:
+// DeepSeek, Qwen (DashScope compatible-mode), GLM, Kimi, etc.
 import { AttendanceRecord } from "../types";
+import { getApiKey, getSettings } from "./settings";
 
 const SYSTEM_INSTRUCTION = `你是一位顶级人力资源数据分析专家和组织绩效顾问。
 你的任务是根据提供的考勤数据，生成一份极具洞察力的中文 Markdown 格式分析报告。
@@ -18,24 +21,36 @@ const SYSTEM_INSTRUCTION = `你是一位顶级人力资源数据分析专家和�
 
 要求：数据驱动、洞察敏锐、措辞专业且具备建设性。`;
 
-export const generateAttendanceReport = async (
-  records: AttendanceRecord[], 
+export class LlmConfigError extends Error {}
+
+/**
+ * Normalizes user-provided base URL to a full chat-completions endpoint.
+ * Accepts any of:
+ *   https://api.deepseek.com            -> + /v1/chat/completions
+ *   https://api.deepseek.com/v1         -> + /chat/completions
+ *   https://.../v1/chat/completions     -> as-is
+ */
+export const toChatCompletionsUrl = (baseUrl: string): string => {
+  const trimmed = baseUrl.trim().replace(/\/+$/, '');
+  if (trimmed.endsWith('/chat/completions')) return trimmed;
+  if (/\/v\d+$/.test(trimmed)) return `${trimmed}/chat/completions`;
+  return `${trimmed}/v1/chat/completions`;
+};
+
+/** 脱敏: replace employee names with 员工A/B/... keeping dept/position (ADR-0002). */
+const anonymizeName = (name: string, index: number): string =>
+  `员工${String.fromCharCode(65 + (index % 26))}`;
+
+const buildSummaryData = (
+  records: AttendanceRecord[],
   departmentContext: string | null,
-  positionContext: string | null
-): Promise<string> => {
-  const apiKey = process.env.API_KEY;
-  if (!apiKey) {
-    throw new Error("API Key is missing.");
-  }
-
-  const ai = new GoogleGenAI({ apiKey });
-
-  // 1. Basic stats
+  positionContext: string | null,
+  anonymize: boolean
+) => {
   const totalEmployees = records.length;
   const totalHours = records.reduce((sum, r) => sum + r.workDuration, 0);
   const avgDuration = totalEmployees > 0 ? totalHours / totalEmployees : 0;
-  
-  // 2. Department aggregation
+
   const deptStats = records.reduce((acc, curr) => {
     const dept = curr.department || '未知部门';
     if (!acc[dept]) acc[dept] = { count: 0, total: 0, max: 0 };
@@ -52,7 +67,6 @@ export const generateAttendanceReport = async (
     最高峰值: stats.max.toFixed(1)
   }));
 
-  // 3. Position aggregation
   const posStats = records.reduce((acc, curr) => {
     const pos = curr.position || '未知职位';
     if (!acc[pos]) acc[pos] = { count: 0, total: 0 };
@@ -67,7 +81,6 @@ export const generateAttendanceReport = async (
     占比: ((stats.count / totalEmployees) * 100).toFixed(1) + '%'
   })).sort((a, b) => parseFloat(b.岗位均值) - parseFloat(a.岗位均值)).slice(0, 8);
 
-  // 4. Time/Batch trend
   const batchStats = records.reduce((acc, curr) => {
     const batch = curr.date || '未知';
     if (!acc[batch]) acc[batch] = { total: 0, count: 0 };
@@ -75,7 +88,7 @@ export const generateAttendanceReport = async (
     acc[batch].count++;
     return acc;
   }, {} as Record<string, any>);
-  
+
   const sortedBatches = Object.keys(batchStats).sort();
   const trendSummary = sortedBatches.map(batch => {
     const stats = batchStats[batch];
@@ -86,8 +99,16 @@ export const generateAttendanceReport = async (
     };
   });
 
-  // 5. Build Final Summary Data for AI
-  const summaryData = {
+  // 高负荷名单: the only person-level data sent out; anonymized by default.
+  const top5 = [...records]
+    .sort((a, b) => b.workDuration - a.workDuration)
+    .slice(0, 5)
+    .map((r, i) => {
+      const name = anonymize ? anonymizeName(r.name, i) : r.name;
+      return `${name} (${r.department}/${r.position}) - ${r.workDuration.toFixed(2)}h [${r.date}]`;
+    });
+
+  return {
     上下文信息: {
       筛选部门: departmentContext || "所有部门",
       筛选职位: positionContext || "所有职位",
@@ -102,36 +123,65 @@ export const generateAttendanceReport = async (
     趋势快照: trendSummary,
     重点岗位排行: posSummary,
     部门对比数据: deptSummary,
-    高负荷Top5名单: [...records]
-      .sort((a, b) => b.workDuration - a.workDuration)
-      .slice(0, 5)
-      .map(r => `${r.name} (${r.department}/${r.position}) - ${r.workDuration.toFixed(2)}h [${r.date}]`)
+    高负荷Top5名单: top5
   };
+};
+
+export const generateAttendanceReport = async (
+  records: AttendanceRecord[],
+  departmentContext: string | null,
+  positionContext: string | null
+): Promise<string> => {
+  const settings = getSettings();
+  const apiKey = await getApiKey();
+
+  if (!settings.baseUrl.trim() || !settings.model.trim() || !apiKey) {
+    throw new LlmConfigError("尚未配置 LLM 服务地址、模型或 API Key,请先打开设置完成配置。");
+  }
+
+  const summaryData = buildSummaryData(records, departmentContext, positionContext, settings.anonymize);
 
   const prompt = `
     作为 AI 顾问，请基于以下汇总的考勤行为数据进行深度审计和分析。
-    
+
     数据摘要:
     \`\`\`json
     ${JSON.stringify(summaryData, null, 2)}
     \`\`\`
-    
+
     请输出专业、深度的 Markdown 报告。注意：如果数据跨越多个月份，请重点提及趋势变化。
   `;
 
+  let response: Response;
   try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: prompt,
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-        temperature: 0.1, // Lower temperature for more analytical consistency
-      }
+    response = await fetch(toChatCompletionsUrl(settings.baseUrl), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: settings.model,
+        messages: [
+          { role: 'system', content: SYSTEM_INSTRUCTION },
+          { role: 'user', content: prompt },
+        ],
+        temperature: 0.1,
+      }),
     });
-    
-    return response.text || "AI 暂时无法生成报告，请检查网络或稍后再试。";
-  } catch (error) {
-    console.error("Gemini context analysis failed:", error);
-    throw error;
+  } catch (err) {
+    throw new Error("无法连接 LLM 服务,请检查网络或服务地址是否正确。");
   }
+
+  if (!response.ok) {
+    let detail = '';
+    try {
+      const body = await response.json();
+      detail = body?.error?.message ?? JSON.stringify(body).slice(0, 200);
+    } catch { detail = await response.text().catch(() => ''); }
+    throw new Error(`LLM 服务返回错误 ${response.status}${detail ? `: ${detail}` : ''}`);
+  }
+
+  const data = await response.json();
+  return data?.choices?.[0]?.message?.content || "AI 暂时无法生成报告，请检查网络或稍后再试。";
 };

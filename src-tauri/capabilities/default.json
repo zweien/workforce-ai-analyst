@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Main window capabilities: dialog, fs scope for user folders, core defaults.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "fs:default",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        { "path": "$DOCUMENT/*" },
+        { "path": "$DOWNLOAD/*" },
+        { "path": "$DESKTOP/*" },
+        { "path": "$HOME/*" }
+      ]
+    }
+  ]
+}
